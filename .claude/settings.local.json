@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:api.anthropic.com)",
+      "Bash(mkdir -p extracted)",
+      "Bash(tar -xzf webfetch-1776611018989-y1zksn.bin -C extracted)",
+      "Bash(start *)",
+      "Bash(python -m http.server 8080)",
+      "Bash(curl -s https://jordbysandra.netlify.app/ -o /tmp/jord_home.html)",
+      "Read(//tmp/**)",
+      "Bash(curl -sL https://jordbysandra.netlify.app/ -o /tmp/jord_home.html)",
+      "Bash(curl -sL \"https://jordbysandra.netlify.app/_next/static/chunks/fb557826a8b6aa91.css\" -o \"/c/Users/ricar/OneDrive/Documents/JORD/jord_styles.css\")",
+      "Bash(curl -sL \"https://jordbysandra.netlify.app/_next/static/chunks/turbopack-754ec594d7c23a2e.js\" -o /tmp/jord_turbopack.js)",
+      "Bash(curl -sL \"https://jordbysandra.netlify.app/_next/static/chunks/925131aeb5d2f15e.js\" -o /tmp/jord_wave.js)",
+      "Bash(curl -sL \"https://jordbysandra.netlify.app/_next/static/chunks/259b54a291709be9.js\" -o /tmp/jord_intro.js)"
+    ]
+  }
+}
