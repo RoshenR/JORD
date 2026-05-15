@@ -1276,9 +1276,21 @@ function Intro() {
       return () => { clearTimeout(tF); clearTimeout(tG); document.body.style.overflow = prev; };
     };
 
-    if (!gl ||
-        !gl.getExtension("EXT_color_buffer_float") ||
-        !gl.getExtension("OES_texture_float_linear")) {
+    if (!gl) return fadeOnly();
+
+    // Pick the best float format the device actually supports.
+    // iOS Safari typically lacks EXT_color_buffer_float, so we fall back to half-float.
+    const hasFloat       = !!gl.getExtension("EXT_color_buffer_float");
+    const hasFloatLinear = !!gl.getExtension("OES_texture_float_linear");
+    const hasHalfFloat   = !!gl.getExtension("EXT_color_buffer_half_float");
+    const hasHalfLinear  = !!gl.getExtension("OES_texture_half_float_linear");
+
+    let TEX_INTERNAL, TEX_TYPE, TEX_FILTER;
+    if (hasFloat && hasFloatLinear) {
+      TEX_INTERNAL = gl.RG32F; TEX_TYPE = gl.FLOAT;       TEX_FILTER = gl.LINEAR;
+    } else if (hasFloat || hasHalfFloat) {
+      TEX_INTERNAL = gl.RG16F; TEX_TYPE = gl.HALF_FLOAT;  TEX_FILTER = hasHalfLinear ? gl.LINEAR : gl.NEAREST;
+    } else {
       return fadeOnly();
     }
 
@@ -1434,9 +1446,9 @@ void main() {
     function makeStateTex() {
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, SIM_W, SIM_H, 0, gl.RG, gl.FLOAT, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texImage2D(gl.TEXTURE_2D, 0, TEX_INTERNAL, SIM_W, SIM_H, 0, gl.RG, TEX_TYPE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, TEX_FILTER);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, TEX_FILTER);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       return tex;
