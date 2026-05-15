@@ -1247,28 +1247,300 @@ function Footer() {
 }
 
 /* =========================================================
-   INTRO — goutte d'eau
+   INTRO — surface d'eau (WebGL2 shader, wave equation on float texture)
    ========================================================= */
 function Intro() {
   const [fading, setFading] = useState(false);
   const [gone, setGone] = useState(false);
+  const canvasRef = useRef(null);
 
   useEffect(() => {
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduce) { setGone(true); return; }
-
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
-    const tFade = setTimeout(() => setFading(true), 4600);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const gl = canvas.getContext("webgl2", {
+      alpha: true,
+      premultipliedAlpha: true,
+      antialias: false,
+      preserveDrawingBuffer: false,
+    });
+
+    const fadeOnly = () => {
+      const tF = setTimeout(() => setFading(true), 3500);
+      const tG = setTimeout(() => { setGone(true); document.body.style.overflow = prev; }, 4800);
+      return () => { clearTimeout(tF); clearTimeout(tG); document.body.style.overflow = prev; };
+    };
+
+    if (!gl ||
+        !gl.getExtension("EXT_color_buffer_float") ||
+        !gl.getExtension("OES_texture_float_linear")) {
+      return fadeOnly();
+    }
+
+    // Match simulation aspect to viewport so ripples stay circular.
+    const SIM_LONG = 360;
+    let SIM_W, SIM_H;
+    {
+      const a = window.innerWidth / window.innerHeight;
+      if (a >= 1) { SIM_W = SIM_LONG; SIM_H = Math.max(180, Math.round(SIM_LONG / a)); }
+      else        { SIM_H = SIM_LONG; SIM_W = Math.max(180, Math.round(SIM_LONG * a)); }
+    }
+
+    const compile = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      return s;
+    };
+    const link = (vs, fs) => {
+      const p = gl.createProgram();
+      gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+      gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(p);
+      return p;
+    };
+
+    const VS = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+    // Wave equation: new = (sum_4_neighbors / 2) - prev, stored in (R, G) = (current, previous).
+    const FS_SIM = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_state;
+uniform vec2 u_texel;
+uniform float u_damping;
+out vec4 outColor;
+void main() {
+  vec2 c = texture(u_state, v_uv).rg;
+  float l = texture(u_state, v_uv - vec2(u_texel.x, 0.0)).r;
+  float r = texture(u_state, v_uv + vec2(u_texel.x, 0.0)).r;
+  float t = texture(u_state, v_uv - vec2(0.0, u_texel.y)).r;
+  float b = texture(u_state, v_uv + vec2(0.0, u_texel.y)).r;
+  float h = (l + r + t + b) * 0.5 - c.g;
+  outColor = vec4(h * u_damping, c.r, 0.0, 1.0);
+}`;
+
+    // Inject a localized impulse into the current height field.
+    const FS_DROP = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_state;
+uniform vec2 u_center;
+uniform float u_radius;
+uniform float u_force;
+out vec4 outColor;
+void main() {
+  vec2 c = texture(u_state, v_uv).rg;
+  float d = distance(v_uv, u_center);
+  float force = 0.0;
+  if (d < u_radius) {
+    float w = cos((d / u_radius) * 1.5707963);
+    force = w * w * u_force;
+  }
+  outColor = vec4(c.r + force, c.g, 0.0, 1.0);
+}`;
+
+    // Visualization: build a normal from the gradient and render water highlights with
+    // premultiplied alpha. Flat regions stay transparent so the dark background shows through.
+    const FS_RENDER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_state;
+uniform vec2 u_texel;
+out vec4 outColor;
+void main() {
+  float c = texture(u_state, v_uv).r;
+  float l = texture(u_state, v_uv - vec2(u_texel.x, 0.0)).r;
+  float r = texture(u_state, v_uv + vec2(u_texel.x, 0.0)).r;
+  float t = texture(u_state, v_uv - vec2(0.0, u_texel.y)).r;
+  float b = texture(u_state, v_uv + vec2(0.0, u_texel.y)).r;
+  float dx = (r - l) * 0.5;
+  float dy = (b - t) * 0.5;
+
+  vec3 N = normalize(vec3(-dx * 36.0, -dy * 36.0, 1.0));
+  vec3 L = normalize(vec3(-0.45, -0.40, 0.78));
+  vec3 V = vec3(0.0, 0.0, 1.0);
+  vec3 H = normalize(L + V);
+  float NdotL = max(0.0, dot(N, L));
+  float NdotH = max(0.0, dot(N, H));
+  float NdotV = max(0.0, dot(N, V));
+
+  float slope = length(vec2(dx, dy));
+  float activity = clamp(abs(c) * 0.45 + slope * 9.0, 0.0, 1.0);
+
+  vec3 cream   = vec3(0.95, 0.91, 0.83);
+  vec3 gold    = vec3(0.86, 0.71, 0.49);
+  vec3 sparkle = vec3(1.00, 0.96, 0.85);
+  vec3 fres    = vec3(0.50, 0.62, 0.80);
+
+  vec3 col = vec3(0.0);
+  col += cream   * NdotL * 0.55;
+  col += sparkle * pow(NdotH, 90.0) * 1.7;
+  col += gold    * max(0.0, c) * 0.55;
+  col += pow(1.0 - NdotV, 3.5) * fres * 0.18;
+
+  float alpha = smoothstep(0.0, 1.0, activity * 1.1);
+  outColor = vec4(col * alpha, alpha);
+}`;
+
+    const progSim    = link(VS, FS_SIM);
+    const progDrop   = link(VS, FS_DROP);
+    const progRender = link(VS, FS_RENDER);
+
+    const aposSim    = gl.getAttribLocation(progSim,    "a_pos");
+    const aposDrop   = gl.getAttribLocation(progDrop,   "a_pos");
+    const aposRender = gl.getAttribLocation(progRender, "a_pos");
+
+    const uSim = {
+      state:   gl.getUniformLocation(progSim, "u_state"),
+      texel:   gl.getUniformLocation(progSim, "u_texel"),
+      damping: gl.getUniformLocation(progSim, "u_damping"),
+    };
+    const uDrop = {
+      state:  gl.getUniformLocation(progDrop, "u_state"),
+      center: gl.getUniformLocation(progDrop, "u_center"),
+      radius: gl.getUniformLocation(progDrop, "u_radius"),
+      force:  gl.getUniformLocation(progDrop, "u_force"),
+    };
+    const uRender = {
+      state: gl.getUniformLocation(progRender, "u_state"),
+      texel: gl.getUniformLocation(progRender, "u_texel"),
+    };
+
+    const quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,  1, -1, -1,  1,
+      -1,  1,  1, -1,  1,  1,
+    ]), gl.STATIC_DRAW);
+
+    function setQuad(loc) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    function makeStateTex() {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, SIM_W, SIM_H, 0, gl.RG, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tex;
+    }
+    function makeFB(tex) {
+      const f = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      return f;
+    }
+
+    const texs = [makeStateTex(), makeStateTex()];
+    const fbs  = [makeFB(texs[0]), makeFB(texs[1])];
+    let curr = 0;
+
+    function resize() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = window.innerWidth, h = window.innerHeight;
+      canvas.width  = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      canvas.style.width  = w + "px";
+      canvas.style.height = h + "px";
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    const pending = [];
+    function queueDrop(x, y, force, radius) {
+      pending.push({ x, y: 1.0 - y, force, radius });
+    }
+
+    let raf = 0, running = true;
+    function step() {
+      while (pending.length) {
+        const d = pending.shift();
+        const next = 1 - curr;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbs[next]);
+        gl.viewport(0, 0, SIM_W, SIM_H);
+        gl.useProgram(progDrop);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texs[curr]);
+        gl.uniform1i(uDrop.state, 0);
+        gl.uniform2f(uDrop.center, d.x, d.y);
+        gl.uniform1f(uDrop.radius, d.radius);
+        gl.uniform1f(uDrop.force, d.force);
+        setQuad(aposDrop);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        curr = next;
+      }
+
+      gl.useProgram(progSim);
+      gl.uniform1i(uSim.state, 0);
+      gl.uniform2f(uSim.texel, 1 / SIM_W, 1 / SIM_H);
+      gl.uniform1f(uSim.damping, 0.988);
+      setQuad(aposSim);
+      for (let s = 0; s < 2; s++) {
+        const next = 1 - curr;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbs[next]);
+        gl.viewport(0, 0, SIM_W, SIM_H);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texs[curr]);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        curr = next;
+      }
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(progRender);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texs[curr]);
+      gl.uniform1i(uRender.state, 0);
+      gl.uniform2f(uRender.texel, 1 / SIM_W, 1 / SIM_H);
+      setQuad(aposRender);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      if (running) raf = requestAnimationFrame(step);
+    }
+    raf = requestAnimationFrame(step);
+
+    const dropPlan = [
+      { t: 500,  x: 0.5,  y: 0.5,  force: 0.85, radius: 0.045 },
+      { t: 950,  x: 0.43, y: 0.46, force: 0.22, radius: 0.024 },
+      { t: 1200, x: 0.57, y: 0.54, force: 0.20, radius: 0.024 },
+      { t: 1700, x: 0.5,  y: 0.5,  force: 0.12, radius: 0.018 },
+    ];
+    const dropTimers = dropPlan.map(d =>
+      setTimeout(() => queueDrop(d.x, d.y, d.force, d.radius), d.t)
+    );
+
+    const tFade = setTimeout(() => setFading(true), 3000);
     const tGone = setTimeout(() => {
       setGone(true);
       document.body.style.overflow = prev;
-    }, 5900);
+    }, 4000);
 
     return () => {
+      running = false;
+      cancelAnimationFrame(raf);
       clearTimeout(tFade);
       clearTimeout(tGone);
+      dropTimers.forEach(clearTimeout);
+      window.removeEventListener("resize", resize);
       document.body.style.overflow = prev;
     };
   }, []);
@@ -1277,32 +1549,15 @@ function Intro() {
 
   return (
     <div className={`intro ${fading ? "intro--out" : ""}`} aria-hidden="true">
-      <div className="intro-stars">
-        <span /><span /><span /><span /><span />
-        <span /><span /><span /><span /><span />
-      </div>
-      <div className="intro-stage">
-        <span className="intro-wave intro-wave--primary" />
-        <span className="intro-wave intro-wave--secondary" />
-        <span className="intro-wave intro-wave--tertiary" />
-        <span className="intro-trail" />
-        <span className="intro-drop" />
-        <span className="intro-flash" />
-        <span className="intro-surface" />
-        <span className="intro-jet" />
-        <span className="intro-jetdrop" />
-        <span className="intro-ripple intro-ripple--1" />
-        <span className="intro-ripple intro-ripple--2" />
-        <span className="intro-ripple intro-ripple--3" />
-        <span className="intro-ripple intro-ripple--4" />
-        <span className="intro-splash intro-splash--c" />
-        <span className="intro-splash intro-splash--l1" />
-        <span className="intro-splash intro-splash--l2" />
-        <span className="intro-splash intro-splash--r1" />
-        <span className="intro-splash intro-splash--r2" />
-        <span className="intro-mark">Jörð</span>
-        <span className="intro-rule" />
-        <span className="intro-sub">by</span>
+      <canvas ref={canvasRef} className="intro-canvas" />
+      <span className="intro-falling-drop" />
+      <span className="intro-flash" />
+      <div className="intro-vignette" />
+      <div className="intro-center">
+        <span className="intro-wordmark">
+          <span className="intro-mark">Jörð</span>
+          <span className="intro-sub">by</span>
+        </span>
       </div>
     </div>
   );
